@@ -130,7 +130,10 @@ my @modes = (
 
   ['server::jobs::failed',
       'failed-jobs', undef,
-      'The number of jobs which did not exit successful in the last <n> minutes (use --lookback)' ],
+      'The jobs which did not exit successful in the last <n> minutes (use --lookback)' ],
+  ['server::jobs::enabled',
+      'jobs-enabled', undef,
+      'The jobs which are not enabled (scheduled)' ],
 
   ['server::sql',
       'sql', undef,
@@ -209,6 +212,8 @@ EOUS
        if mode database-free finds a database which is currently offline,
        a WARNING is issued. If you don't want this and if offline databases
        are perfectly ok for you, then add --offlineok. You will get OK instead.
+    --commit
+       turns on autocommit for the dbd::sybase module
 
   Database-related modes check all databases in one run by default.
   If only a single database should be checked, use the --name parameter.
@@ -311,6 +316,7 @@ my @params = (
     "basis",
     "lookback|l=i",
     "environment|e=s%",
+    "negate=s%",
     "method=s",
     "runas|r=s",
     "scream",
@@ -322,6 +328,8 @@ my @params = (
     "statefilesdir=s",
     "with-mymodules-dyn-dir=s",
     "report=s",
+    "commit",
+    "labelformat=s",
     "extra-opts:s");
 
 if (! GetOptions(\%commandline, @params)) {
@@ -382,6 +390,18 @@ if (exists $commandline{report}) {
   # short, long, html
 } else {
   $commandline{report} = "long";
+}
+
+if (exists $commandline{commit}) {
+  $commandline{commit} = 1;
+} else {
+  $commandline{commit} = 0;
+}
+
+if (exists $commandline{labelformat}) {
+  # groundwork
+} else {
+  $commandline{labelformat} = "pnp4nagios";
 }
 
 if (exists $commandline{'with-mymodules-dyn-dir'}) {
@@ -587,6 +607,9 @@ my %params = (
     statefilesdir => $commandline{statefilesdir},
     verbose => $commandline{verbose},
     report => $commandline{report},
+    commit => $commandline{commit},
+    labelformat => $commandline{labelformat},
+    negate => $commandline{negate},
 );
 
 my $server = undef;

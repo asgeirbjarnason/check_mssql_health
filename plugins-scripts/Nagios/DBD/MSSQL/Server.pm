@@ -35,6 +35,7 @@ sub new {
   my $class = shift;
   my %params = @_;
   my $self = {
+    mode => $params{mode},
     method => $params{method} || "dbi",
     hostname => $params{hostname},
     username => $params{username},
@@ -46,6 +47,9 @@ sub new {
     criticalrange => $params{criticalrange},
     verbose => $params{verbose},
     report => $params{report},
+    commit => $params{commit},
+    negate => $params{negate},
+    labelformat => $params{labelformat},
     version => 'unknown',
     os => 'unknown',
     servicename => 'unknown',
@@ -124,7 +128,10 @@ sub init {
         DBD::MSSQL::Server::Job::return_jobs()) {
       $self->{jobs} = \@jobs;
     } else {
-      $self->add_nagios_critical(sprintf "no jobs ran within the last %d minutes", $params{lookback});
+      $self->add_nagios(
+          defined $params{mitigation} ? $params{mitigation} : 2,
+          sprintf "no jobs ran within the last %d minutes", $params{lookback}
+      );
     }
   } elsif ($params{mode} =~ /^server::connectiontime/) {
     $self->{connection_time} = $self->{tac} - $self->{tic};
@@ -160,6 +167,7 @@ sub init {
       if (defined $self->{secs_busy}) {
         $self->{cpu_busy} = 100 *
             $self->{delta_secs_busy} / $self->{delta_timestamp};
+        $self->protect_value(\%params, 'cpu_busy', 'cpu_busy', 'percent');
       } else {
         $self->add_nagios_critical("got no cputime from dm_os_sys_info");
       }
@@ -187,10 +195,31 @@ sub init {
               (SELECT CAST(CPU_COUNT AS FLOAT) FROM sys.dm_os_sys_info) /
               1000000)
       });
+#      ($self->{secs_busy2}) = $self->{handle}->fetchrow_array(q{
+#          SELECT
+#              SUM(WAIT_TIME_MS) / 1000.0
+#          FROM
+#              sys.dm_os_wait_stats
+#          WHERE
+#              wait_type IN ('ASYNC_IO_COMPLETION', 'IO_COMPLETION', 
+#                  'WRITELOG', 'BACKUPIO')
+#              OR wait_type like 'PAGEIOLATCH%'
+#      });
+#      ($self->{secs_busy}) = $self->{handle}->fetchrow_array(q{
+#        -- if pct signal wait > 10%, means that more cpu are required 
+#          SELECT 
+#              CAST(100.0 * SUM(signal_wait_time_ms) / SUM(wait_time_ms)) 
+#                  AS [%signal (cpu) waits],
+#              CAST(100.0 * SUM(wait_time_ms - signal_wait_time_ms) / SUM(wait_time_ms))
+#                  AS [%resource waits]
+#          FROM sys.dm_os_wait_stats
+#      });
+ 
       $self->valdiff(\%params, qw(secs_busy));
       if (defined $self->{secs_busy}) {
         $self->{io_busy} = 100 *
             $self->{delta_secs_busy} / $self->{delta_timestamp};
+        $self->protect_value(\%params, 'io_busy', 'io_busy', 'percent');
       } else {
         $self->add_nagios_critical("got no iotime from dm_os_sys_info");
       }
@@ -586,44 +615,45 @@ sub check_thresholds {
       $self->{warningrange} : $defaultwarningrange;
   $self->{criticalrange} = defined $self->{criticalrange} ?
       $self->{criticalrange} : $defaultcriticalrange;
-  if ($self->{warningrange} =~ /^(\d+)$/) {
+
+  if ($self->{warningrange} =~ /^([-+]?[0-9]*\.?[0-9]+)$/) {
     # warning = 10, warn if > 10 or < 0
     $level = $ERRORS{WARNING}
         if ($value > $1 || $value < 0);
-  } elsif ($self->{warningrange} =~ /^(\d+):$/) {
+  } elsif ($self->{warningrange} =~ /^([-+]?[0-9]*\.?[0-9]+):$/) {
     # warning = 10:, warn if < 10
     $level = $ERRORS{WARNING}
         if ($value < $1);
-  } elsif ($self->{warningrange} =~ /^~:(\d+)$/) {
+  } elsif ($self->{warningrange} =~ /^~:([-+]?[0-9]*\.?[0-9]+)$/) {
     # warning = ~:10, warn if > 10
     $level = $ERRORS{WARNING}
         if ($value > $1);
-  } elsif ($self->{warningrange} =~ /^(\d+):(\d+)$/) {
+  } elsif ($self->{warningrange} =~ /^([-+]?[0-9]*\.?[0-9]+):([-+]?[0-9]*\.?[0-9]+)$/) {
     # warning = 10:20, warn if < 10 or > 20
     $level = $ERRORS{WARNING}
         if ($value < $1 || $value > $2);
-  } elsif ($self->{warningrange} =~ /^@(\d+):(\d+)$/) {
+  } elsif ($self->{warningrange} =~ /^@([-+]?[0-9]*\.?[0-9]+):([-+]?[0-9]*\.?[0-9]+)$/) {
     # warning = @10:20, warn if >= 10 and <= 20
     $level = $ERRORS{WARNING}
         if ($value >= $1 && $value <= $2);
   }
-  if ($self->{criticalrange} =~ /^(\d+)$/) {
+  if ($self->{criticalrange} =~ /^([-+]?[0-9]*\.?[0-9]+)$/) {
     # critical = 10, crit if > 10 or < 0
     $level = $ERRORS{CRITICAL}
         if ($value > $1 || $value < 0);
-  } elsif ($self->{criticalrange} =~ /^(\d+):$/) {
+  } elsif ($self->{criticalrange} =~ /^([-+]?[0-9]*\.?[0-9]+):$/) {
     # critical = 10:, crit if < 10
     $level = $ERRORS{CRITICAL}
         if ($value < $1);
-  } elsif ($self->{criticalrange} =~ /^~:(\d+)$/) {
+  } elsif ($self->{criticalrange} =~ /^~:([-+]?[0-9]*\.?[0-9]+)$/) {
     # critical = ~:10, crit if > 10
     $level = $ERRORS{CRITICAL}
         if ($value > $1);
-  } elsif ($self->{criticalrange} =~ /^(\d+):(\d+)$/) {
+  } elsif ($self->{criticalrange} =~ /^([-+]?[0-9]*\.?[0-9]+):([-+]?[0-9]*\.?[0-9]+)$/) {
     # critical = 10:20, crit if < 10 or > 20
     $level = $ERRORS{CRITICAL}
         if ($value < $1 || $value > $2);
-  } elsif ($self->{criticalrange} =~ /^@(\d+):(\d+)$/) {
+  } elsif ($self->{criticalrange} =~ /^@([-+]?[0-9]*\.?[0-9]+):([-+]?[0-9]*\.?[0-9]+)$/) {
     # critical = @10:20, crit if >= 10 and <= 20
     $level = $ERRORS{CRITICAL}
         if ($value >= $1 && $value <= $2);
@@ -692,6 +722,7 @@ sub merge_nagios {
 
 sub calculate_result {
   my $self = shift;
+  my $labels = shift || {};
   my $multiline = 0;
   map {
     $self->{nagios_level} = $ERRORS{$_} if
@@ -711,7 +742,18 @@ sub calculate_result {
   } grep {
       scalar(@{$self->{nagios}->{messages}->{$ERRORS{$_}}})
   } ("CRITICAL", "WARNING", "UNKNOWN"));
+  my $good_messages = join(($multiline ? "\n" : ", "), map {
+      join(($multiline ? "\n" : ", "), @{$self->{nagios}->{messages}->{$ERRORS{$_}}})
+  } grep {
+      scalar(@{$self->{nagios}->{messages}->{$ERRORS{$_}}})
+  } ("OK"));
   my $all_messages_short = $bad_messages ? $bad_messages : 'no problems';
+  # if mode = my-....
+  # and there are some ok-messages
+  # output them instead of "no problems"
+  if ($self->{mode} =~ /^my\:\:/ && $good_messages) {
+    $all_messages_short = $bad_messages ? $bad_messages : $good_messages;
+  }
   my $all_messages_html = "<table style=\"border-collapse: collapse;\">".
       join("", map {
           my $level = $_;
@@ -741,7 +783,33 @@ sub calculate_result {
   } elsif ($self->{report} eq "html") {
     $self->{nagios_message} .= $all_messages_short."\n".$all_messages_html;
   }
-  $self->{perfdata} = join(" ", @{$self->{nagios}->{perfdata}});
+  foreach my $from (keys %{$self->{negate}}) {
+    if ((uc $from) =~ /^(OK|WARNING|CRITICAL|UNKNOWN)$/ &&
+        (uc $self->{negate}->{$from}) =~ /^(OK|WARNING|CRITICAL|UNKNOWN)$/) {
+      if ($self->{nagios_level} == $ERRORS{uc $from}) {
+        $self->{nagios_level} = $ERRORS{uc $self->{negate}->{$from}};
+      }
+    }
+  }
+  if ($self->{labelformat} eq "pnp4nagios") {
+    $self->{perfdata} = join(" ", @{$self->{nagios}->{perfdata}});
+  } else {
+    $self->{perfdata} = join(" ", map {
+        my $perfdata = $_;
+        if ($perfdata =~ /^(.*?)=(.*)/) {
+          my $label = $1;
+          my $data = $2;
+          if (exists $labels->{$label} &&
+              exists $labels->{$label}->{$self->{labelformat}}) {
+            $labels->{$label}->{$self->{labelformat}}."=".$data;
+          } else {
+            $perfdata;
+          }
+        } else {
+          $perfdata;
+        }
+    } @{$self->{nagios}->{perfdata}});
+  }
 }
 
 sub set_global_db_thresholds {
@@ -914,6 +982,43 @@ sub DESTROY {
   }
 }
 
+# $self->protect_value(\%params, 'cpu_busy', 'cpu_busy', 'percent');
+sub protect_value {
+  my $self = shift;
+  my $pparams = shift;
+  my %params = %{$pparams};
+  my $ident = shift;
+  my $key = shift;
+  my $validfunc = shift;
+  if (ref($validfunc) ne "CODE" && $validfunc eq "percent") {
+    $validfunc = sub {
+      my $value = shift;
+      return ($value < 0 || $value > 100) ? 0 : 1;
+    }
+  }
+  if (&$validfunc($self->{$key})) {
+    $self->save_state(%params, (name => 'protect_'.$ident.'_'.$key, save => {
+        $key => $self->{$key},
+        exception => 0,
+    }));
+  } else {
+    # if the device gives us an clearly wrong value, simply use the last value.
+    my $laststate = $self->load_state(%params, (name => 'protect_'.$ident.'_'.$key));
+    $self->debug(sprintf "self->{%s} is %s and invalid for the %dth time",
+        $key, $self->{$key}, $laststate->{exception} + 1);
+    if ($laststate->{exception} < 4) {
+      # but only 5 times. 
+      # if the error persists, somebody has to check the device.
+      $self->{$key} = $laststate->{$key};
+    }
+    $laststate->{exception}++;
+    $self->save_state(%params, (name => 'protect_'.$ident.'_'.$key, save => {
+        $key => $self->{$key},
+        exception => $laststate->{exception},
+    }));
+  }
+}
+
 sub save_state {
   my $self = shift;
   my %params = @_;
@@ -1031,7 +1136,15 @@ sub valdiff {
       $self->{'delta_'.$_} = $self->{$_} - $last_values->{$_};
     } else {
       # vermutlich db restart und zaehler alle auf null
-      $self->{'delta_'.$_} = $self->{$_};
+      # und sowas hier gibt's auch noch: beide werte sind 349525.330729167
+      # perl ist der meinung, dass $self->{$_} < $last_values->{$_}
+      # liegt wohl an rundungsfehlern beim schreiben durch data::dumper etc.
+      # heraus kommen dann irrsinnigste werte CRITICAL - CPU busy 582542.22%
+      if (sprintf("%s", $self->{$_}) eq sprintf("%s", $last_values->{$_})) {
+        $self->{'delta_'.$_} = 0;
+      } else {
+        $self->{'delta_'.$_} = $self->{$_};
+      }
     }
     $self->debug(sprintf "delta_%s %f", $_, $self->{'delta_'.$_});
   }
@@ -1154,6 +1267,7 @@ sub new {
     username => $params{username},
     password => $params{password},
     verbose => $params{verbose},
+    commit => $params{commit},
     port => $params{port} || 1433,
     server => $params{server},
     currentdb => $params{currentdb},
@@ -1296,7 +1410,7 @@ sub init {
       $self->{errstr} = "Please specify hostname or server, username and password";
       return undef;
     }
-    $self->{dbi_options} = { RaiseError => 1, AutoCommit => 0, PrintError => 1 };
+    $self->{dbi_options} = { RaiseError => 1, AutoCommit => $self->{commit}, PrintError => 1 };
     $self->{dsn} = "DBI:Sybase:";
     if ($self->{hostname}) {
       $self->{dsn} .= sprintf ";host=%s", $self->{hostname};
@@ -2119,7 +2233,7 @@ sub init {
               $self->{hostname}, $self->{port}),
         $self->{username},
         $self->{password},
-        { RaiseError => 1, AutoCommit => 0, PrintError => 1 })) {
+        { RaiseError => 1, AutoCommit => $self->{commit}, PrintError => 1 })) {
       } else {
         $self->{errstr} = DBI::errstr();
       }

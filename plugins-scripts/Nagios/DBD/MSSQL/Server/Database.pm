@@ -138,6 +138,7 @@ my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
       }
       foreach (@databaseresult) {
         my ($name, $state, $state_desc, $collation_name) = @{$_};
+        next if $params{notemp} && $name eq "tempdb";
         next if $params{database} && $name ne $params{database};
         if ($params{regexp}) {
           next if $params{selectname} && $name !~ /$params{selectname}/;
@@ -212,6 +213,7 @@ my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
         }
       }
       foreach my $name (@databasenames) {
+        next if $params{notemp} && $name eq "tempdb";
         next if $params{database} && $name ne $params{database};
         if ($params{regexp}) {
           next if $params{selectname} && $name !~ /$params{selectname}/;
@@ -274,6 +276,7 @@ my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
         }
       }
       foreach my $name (@databasenames) {
+        next if $params{notemp} && $name eq "tempdb";
         next if $params{database} && $name ne $params{database};
         if ($params{regexp}) {
           next if $params{selectname} && $name !~ /$params{selectname}/;
@@ -309,7 +312,7 @@ my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
                 DATEDIFF(HH,MAX(BS.[backup_finish_date]),GETDATE()) AS last_backup,
                 DATEDIFF(MI,MAX(BS.[backup_start_date]),MAX(BS.[backup_finish_date])) AS last_duration
                 FROM msdb.dbo.backupset BS
-                WHERE BS.type = 'D'
+                WHERE BS.type IN ('D', 'I')
                 GROUP BY BS.[database_name]
               ) BS1 ON D.name = BS1.[database_name]
               ORDER BY D.[name];
@@ -351,6 +354,7 @@ my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
           }
         } @databaseresult) { 
           my ($name, $recovery_model, $age, $duration) = @{$_};
+          next if $params{notemp} && $name eq "tempdb";
           next if $params{database} && $name ne $params{database};
           if ($params{regexp}) { 
             next if $params{selectname} && $name !~ /$params{selectname}/;
@@ -375,6 +379,7 @@ my %ERRORCODES=( 0 => 'OK', 1 => 'WARNING', 2 => 'CRITICAL', 3 => 'UNKNOWN' );
         });
         foreach (@databaseresult) {
           my ($name, $id) = @{$_};
+          next if $params{notemp} && $name eq "tempdb";
           next if $params{database} && $name ne $params{database};
           if ($params{regexp}) {
             next if $params{selectname} && $name !~ /$params{selectname}/;
@@ -436,7 +441,7 @@ sub new {
     autogrowshrink => $params{autogrowshrink},
     growshrinkinterval => $params{growshrinkinterval},
     state => $params{state},
-    state_desc => lc $params{state_desc},
+    state_desc => $params{state_desc} ? lc $params{state_desc} : undef,
     collation_name => $params{collation_name},
     recovery_model => $params{recovery_model},
     offline => 0,
@@ -764,7 +769,23 @@ sub init {
   } elsif ($params{mode} =~ /^server::database::transactions/) {
     $self->{transactions_s} = $self->{handle}->get_perf_counter_instance(
         'SQLServer:Databases', 'Transactions/sec', $self->{name});
-    if (! defined $self->{transactions_s}) {
+    my $autoclosed = 0;
+    if ($self->{name} ne '_Total' &&
+        DBD::MSSQL::Server::return_first_server()->version_is_minimum("9.x")) {
+      my $sql = q{
+          SELECT is_cleanly_shutdown, CAST(DATABASEPROPERTYEX('?', 'isautoclose') AS VARCHAR)
+          FROM master.sys.databases WHERE name = '?'};
+      $sql =~ s/\?/$self->{name}/g;
+      my @autoclose = $self->{handle}->fetchrow_array($sql);
+      if ($autoclose[0] == 1 && $autoclose[1] == 1) {
+        $autoclosed = 1;
+      }
+    }
+    if ($autoclosed) {
+      $self->{transactions_s} = 0;
+      $self->{transactions_per_sec} = 0;
+      $self->valdiff(\%params, qw(transactions_s));
+    } elsif (! defined $self->{transactions_s}) {
       $self->add_nagios_unknown("unable to aquire counter data");
     } else {
       $self->valdiff(\%params, qw(transactions_s));
